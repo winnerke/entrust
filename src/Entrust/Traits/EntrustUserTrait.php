@@ -1,5 +1,4 @@
 <?php namespace Zizaco\Entrust\Traits;
-
 /**
  * This file is part of Entrust,
  * a role & permission management solution for Laravel.
@@ -7,66 +6,15 @@
  * @license MIT
  * @package Zizaco\Entrust
  */
-
-use Illuminate\Cache\TaggableStore;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use InvalidArgumentException;
-
 trait EntrustUserTrait
 {
     /**
-     * Big block of caching functionality.
-     *
-     * @return mixed Roles
+     * Store permission set for one request.
+     * @var
      */
-    public function cachedRoles()
-    {
-        $userPrimaryKey = $this->primaryKey;
-        $cacheKey = 'entrust_roles_for_user_'.$this->$userPrimaryKey;
-        if(Cache::getStore() instanceof TaggableStore) {
-            return Cache::tags(Config::get('entrust.role_user_table'))->remember($cacheKey, Config::get('cache.ttl'), function () {
-                return $this->roles()->get();
-            });
-        }
-        else return $this->roles()->get();
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function save(array $options = [])
-    {   //both inserts and updates
-        if(Cache::getStore() instanceof TaggableStore) {
-            Cache::tags(Config::get('entrust.role_user_table'))->flush();
-        }
-        return parent::save($options);
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function delete(array $options = [])
-    {   //soft or hard
-        $result = parent::delete($options);
-        if(Cache::getStore() instanceof TaggableStore) {
-            Cache::tags(Config::get('entrust.role_user_table'))->flush();
-        }
-        return $result;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public function restore()
-    {   //soft delete undo's
-        $result = parent::restore();
-        if(Cache::getStore() instanceof TaggableStore) {
-            Cache::tags(Config::get('entrust.role_user_table'))->flush();
-        }
-        return $result;
-    }
-
+    protected $permissionSet;
     /**
      * Many-to-Many relations with Role.
      *
@@ -74,9 +22,8 @@ trait EntrustUserTrait
      */
     public function roles()
     {
-        return $this->belongsToMany(Config::get('entrust.role'), Config::get('entrust.role_user_table'), Config::get('entrust.user_foreign_key'), Config::get('entrust.role_foreign_key'));
+        return $this->belongsToMany(Config::get('entrust.role'), Config::get('entrust.role_user_table'), Config::get('entrust.user_foreign_key'), 'role_id');
     }
-
     /**
      * Boot the user model
      * Attach event listener to remove the many-to-many records when trying to delete
@@ -87,21 +34,18 @@ trait EntrustUserTrait
     public static function boot()
     {
         parent::boot();
-
-        static::deleting(function($user) {
-            if (!method_exists(Config::get('auth.providers.users.model'), 'bootSoftDeletes')) {
+        static::deleting(function ($user) {
+            if (!method_exists(Config::get('auth.model'), 'bootSoftDeletes')) {
                 $user->roles()->sync([]);
             }
-
             return true;
         });
     }
-
     /**
      * Checks if the user has a role by its name.
      *
-     * @param string|array $name       Role name or array of role names.
-     * @param bool         $requireAll All roles in the array are required.
+     * @param string|array $name Role name or array of role names.
+     * @param bool $requireAll All roles in the array are required.
      *
      * @return bool
      */
@@ -110,34 +54,30 @@ trait EntrustUserTrait
         if (is_array($name)) {
             foreach ($name as $roleName) {
                 $hasRole = $this->hasRole($roleName);
-
                 if ($hasRole && !$requireAll) {
                     return true;
                 } elseif (!$hasRole && $requireAll) {
                     return false;
                 }
             }
-
             // If we've made it this far and $requireAll is FALSE, then NONE of the roles were found
             // If we've made it this far and $requireAll is TRUE, then ALL of the roles were found.
             // Return the value of $requireAll;
             return $requireAll;
         } else {
-            foreach ($this->cachedRoles() as $role) {
+            foreach ($this->roles as $role) {
                 if ($role->name == $name) {
                     return true;
                 }
             }
         }
-
         return false;
     }
-
     /**
      * Check if user has a permission by its name.
      *
      * @param string|array $permission Permission string or array of permissions.
-     * @param bool         $requireAll All permissions in the array are required.
+     * @param bool $requireAll All permissions in the array are required.
      *
      * @return bool
      */
@@ -146,38 +86,48 @@ trait EntrustUserTrait
         if (is_array($permission)) {
             foreach ($permission as $permName) {
                 $hasPerm = $this->can($permName);
-
                 if ($hasPerm && !$requireAll) {
                     return true;
                 } elseif (!$hasPerm && $requireAll) {
                     return false;
                 }
             }
-
             // If we've made it this far and $requireAll is FALSE, then NONE of the perms were found
             // If we've made it this far and $requireAll is TRUE, then ALL of the perms were found.
             // Return the value of $requireAll;
             return $requireAll;
         } else {
-            foreach ($this->cachedRoles() as $role) {
+            foreach ($this->getPermissionSet() as $role) {
                 // Validate against the Permission table
-                foreach ($role->cachedPermissions() as $perm) {
-                    if (str_is( $permission, $perm->name) ) {
+                foreach ($role->perms as $perm) {
+                    if ($perm->name == $permission) {
                         return true;
                     }
                 }
             }
         }
-
         return false;
     }
-
+    /**
+     * Retrive the user role(s) and permission(s).
+     * @return mixed
+     */
+    public function getPermissionSet()
+    {
+        // If we already get the permission set we will return that back
+        // or else we will get permission set from Database.
+        if (!is_null($this->permissionSet)) {
+            return $this->permissionSet;
+        }
+        // getting the permissionSet roles and permission by eager loading.
+        return $this->permissionSet = $this->roles()->with('perms')->get();
+    }
     /**
      * Checks role(s) and permission(s).
      *
-     * @param string|array $roles       Array of roles or comma separated string
+     * @param string|array $roles Array of roles or comma separated string
      * @param string|array $permissions Array of permissions or comma separated string.
-     * @param array        $options     validate_all (true|false) or return_type (boolean|array|both)
+     * @param array $options validate_all (true|false) or return_type (boolean|array|both)
      *
      * @throws \InvalidArgumentException
      *
@@ -192,7 +142,6 @@ trait EntrustUserTrait
         if (!is_array($permissions)) {
             $permissions = explode(',', $permissions);
         }
-
         // Set up default values and validate options.
         if (!isset($options['validate_all'])) {
             $options['validate_all'] = false;
@@ -206,11 +155,11 @@ trait EntrustUserTrait
         } else {
             if ($options['return_type'] != 'boolean' &&
                 $options['return_type'] != 'array' &&
-                $options['return_type'] != 'both') {
+                $options['return_type'] != 'both'
+            ) {
                 throw new InvalidArgumentException();
             }
         }
-
         // Loop through roles and permissions and check each.
         $checkedRoles = [];
         $checkedPermissions = [];
@@ -220,17 +169,16 @@ trait EntrustUserTrait
         foreach ($permissions as $permission) {
             $checkedPermissions[$permission] = $this->can($permission);
         }
-
         // If validate all and there is a false in either
         // Check that if validate all, then there should not be any false.
         // Check that if not validate all, there must be at least one true.
-        if(($options['validate_all'] && !(in_array(false,$checkedRoles) || in_array(false,$checkedPermissions))) ||
-            (!$options['validate_all'] && (in_array(true,$checkedRoles) || in_array(true,$checkedPermissions)))) {
+        if (($options['validate_all'] && !(in_array(false, $checkedRoles) || in_array(false, $checkedPermissions))) ||
+            (!$options['validate_all'] && (in_array(true, $checkedRoles) || in_array(true, $checkedPermissions)))
+        ) {
             $validateAll = true;
         } else {
             $validateAll = false;
         }
-
         // Return based on option
         if ($options['return_type'] == 'boolean') {
             return $validateAll;
@@ -239,9 +187,7 @@ trait EntrustUserTrait
         } else {
             return [$validateAll, ['roles' => $checkedRoles, 'permissions' => $checkedPermissions]];
         }
-
     }
-
     /**
      * Alias to eloquent many-to-many relation's attach() method.
      *
@@ -249,17 +195,14 @@ trait EntrustUserTrait
      */
     public function attachRole($role)
     {
-        if(is_object($role)) {
+        if (is_object($role)) {
             $role = $role->getKey();
         }
-
-        if(is_array($role)) {
+        if (is_array($role)) {
             $role = $role['id'];
         }
-
         $this->roles()->attach($role);
     }
-
     /**
      * Alias to eloquent many-to-many relation's detach() method.
      *
@@ -270,14 +213,11 @@ trait EntrustUserTrait
         if (is_object($role)) {
             $role = $role->getKey();
         }
-
         if (is_array($role)) {
             $role = $role['id'];
         }
-
         $this->roles()->detach($role);
     }
-
     /**
      * Attach multiple roles to a user
      *
@@ -289,33 +229,15 @@ trait EntrustUserTrait
             $this->attachRole($role);
         }
     }
-
     /**
      * Detach multiple roles from a user
      *
      * @param mixed $roles
      */
-    public function detachRoles($roles=null)
+    public function detachRoles($roles)
     {
-        if (!$roles) $roles = $this->roles()->get();
-
         foreach ($roles as $role) {
             $this->detachRole($role);
         }
     }
-
-    /**
-     *Filtering users according to their role 
-     *
-     *@param string $role
-     *@return users collection
-     */
-    public function scopeWithRole($query, $role)
-    {
-        return $query->whereHas('roles', function ($query) use ($role)
-        {
-            $query->where('name', $role);
-        });
-    }
-
 }
